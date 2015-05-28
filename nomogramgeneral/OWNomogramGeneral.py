@@ -16,6 +16,10 @@ import Orange.OrangeWidgets.OWGUI
 from Orange.OrangeWidgets.OWWidget import *
 from Orange.OrangeWidgets.Classify.OWNomogramGraph import *
 from orngDataCaching import *
+import itertools
+from distutils.command.install import install
+from scipy.weave.catalog import get_catalog
+from Orange.orng.orngDataCaching import getCached
 
 aproxZero = 0.0001
 
@@ -85,7 +89,7 @@ class OWNomogramGeneral(OWWidget):
         self.bnomogram = None
 
 
-        self.inputs=[("Classifier", orange.Classifier, self.classifier)]
+        self.inputs=[("Classifier", orange.Classifier, self.classifier), ("Data", Orange.data.Table, self.data)]
 
 
         self.TargetClassIndex = 0
@@ -220,28 +224,25 @@ class OWNomogramGeneral(OWWidget):
 
         for at in range(len(att)):
             a = None
-            if att[at].varType == orange.VarTypes.Discrete:
-                if att[at].ordered:
-                    a = AttrLineOrdered(att[at].name, self.bnomogram)
+            attribute = att[at]
+            if attribute.varType == orange.VarTypes.Discrete:
+                if attribute.ordered:
+                    a = AttrLineOrdered(attribute.name, self.bnomogram)
                 else:
-                    a = AttrLine(att[at].name, self.bnomogram)
+                    a = AttrLine(attribute.name, self.bnomogram)
                 for cd in cl.conditionalDistributions[at].keys():
+                    conditionalDistribution = cl.conditionalDistributions[at][cd]
                     # calculuate thickness
-                    conditional0 = max(cl.conditionalDistributions[at][cd][classVal[self.TargetClassIndex]], aproxZero)
-                    conditional1 = max(1-cl.conditionalDistributions[at][cd][classVal[self.TargetClassIndex]], aproxZero)
+                    targetClassDistribution = conditionalDistribution[classVal[self.TargetClassIndex]]
+                    conditional0 = max(targetClassDistribution, aproxZero)
+                    conditional1 = max(1-targetClassDistribution, aproxZero)
                     beta = math.log(conditional0/conditional1/prior)
-                    if self.data:
-                        #thickness = int(round(4.*float(len(self.data.filter({att[at].name:str(cd)})))/float(len(self.data))))
-                        thickness = float(len(self.data.filter({att[at].name:str(cd)})))/float(len(self.data))
-                        se = err(cl.conditionalDistributions[at][cd], att[at], cd, classVal[self.TargetClassIndex], priorError, self.data) # standar error of beta
-                    else:
-                        thickness = 0
-                        se = 0
+                    
 
-                    a.addAttValue(AttValue(str(cd), beta, lineWidth=thickness, error = se))
+                    a.addAttValue(AttValue(cd, beta))
 
             else:
-                a = AttrLineCont(att[at].name, self.bnomogram)
+                a = AttrLineCont(attribute.name, self.bnomogram)
                 numOfPartitions = 50
 
                 if self.data:
@@ -263,7 +264,7 @@ class OWNomogramGeneral(OWWidget):
                     if curr_num+i*d>=minAtValue and curr_num+i*d<=maxAtValue:
                         # get thickness
                         if self.data:
-                            thickness = float(len(self.data.filter({att[at].name:(curr_num+i*d-d/2, curr_num+i*d+d/2)})))/len(self.data)
+                            thickness = float(len(self.data.filter({attribute.name:(curr_num+i*d-d/2, curr_num+i*d+d/2)})))/len(self.data)
                         else:
                             thickness = 0.0
                         d_filter = filter(lambda x: x>curr_num+i*d-d/2 and x<curr_num+i*d+d/2, cl.conditionalDistributions[at].keys())
@@ -660,6 +661,188 @@ class OWNomogramGeneral(OWWidget):
         self.bnomogram.show()
 
     def generalClassifier(self, cl):
+        if not self.learn_data:
+            print('No data :(')
+            return 1
+        else:
+            self.data = self.learn_data
+        
+        self.stat = orange.DomainBasicAttrStat(self.data,)
+        
+        if self.bnomogram:
+            self.bnomogram.destroy_and_init(self, AttValue("Constant", 0.0))
+        else:
+            self.bnomogram = BasicNomogram(self, AttValue("Constant", 0.0))
+
+        self.generatedData = self.generateData(cl)
+        #self.data = cl.data
+        classVal = cl.domain.classVar
+        targetClass = classVal[self.TargetClassIndex].value
+        
+        # Calculate distributions
+        #new_dist = Orange.statistics.contingency.Domain(self.data)
+        cl.conditionalDistributions = Orange.statistics.contingency.Domain(self.generatedData)
+        cl.conditionalDistributions.normalize()
+        cl.distribution = Orange.statistics.distribution.Distribution(classVal.name, self.generatedData)
+        cl.distribution.normalize()
+        #self.calculateDistributions(cl)                 
+
+        # calculate prior probability
+        dist1 = max(aproxZero, 1-cl.distribution[classVal[self.TargetClassIndex]])
+        dist0 = max(aproxZero, cl.distribution[classVal[self.TargetClassIndex]])
+        prior = dist0/dist1
+        
+        
+        for at, attribute  in enumerate(cl.domain.attributes):
+            a = None                        
+            if attribute.varType == orange.VarTypes.Discrete:
+                if attribute.ordered:
+                    a = AttrLineOrdered(attribute.name, self.bnomogram)
+                else:
+                    a = AttrLine(attribute.name, self.bnomogram)
+                for cd in cl.conditionalDistributions[at].keys():
+                    conditionalDistribution = cl.conditionalDistributions[at][cd]
+                    
+                    targetClassDistribution = conditionalDistribution[classVal[self.TargetClassIndex]]
+                    conditional0 = max(targetClassDistribution, aproxZero)
+                    conditional1 = max(1-targetClassDistribution, aproxZero)
+                    beta = math.log(conditional0/conditional1/prior)
+                    
+
+                    a.addAttValue(AttValue(cd, beta))
+
+            else:
+                a = AttrLineCont(attribute.name, self.bnomogram)
+                numOfPartitions = 50
+
+                if self.data:
+                    maxAtValue = self.stat[at].max
+                    minAtValue = self.stat[at].min
+                else:
+                    maxAtValue = cl.conditionalDistributions[at].keys()[len(cl.conditionalDistributions[at].keys())-1]
+                    minAtValue = cl.conditionalDistributions[at].keys()[0]
+
+                d = maxAtValue-minAtValue
+                d = getDiff(d/numOfPartitions)
+
+                # get curr_num = starting point for continuous att. sampling
+                curr_num = getStartingPoint(d, minAtValue)
+                rndFac = getRounding(d)
+
+                values = []
+                for cn in numpy.arange(minAtValue, maxAtValue, d):
+                #for i in range(2*numOfPartitions):
+                    if cn>=minAtValue and cn<=maxAtValue:
+                        
+                        d_filter = filter(lambda x: x>cn-d/2 and x<cn+d/2, cl.conditionalDistributions[at].keys())
+                        if len(d_filter)>0:
+                            cd = cl.conditionalDistributions[at]
+                            conditional0 = avg([cd[f][classVal[self.TargetClassIndex]] for f in d_filter])
+                            conditional0 = min(1-aproxZero,max(aproxZero,conditional0))
+                            conditional1 = 1-conditional0
+                            try:
+                                # compute error of loess in logistic space
+                                var = avg([cd[f].variances[self.TargetClassIndex] for f in d_filter])
+                                standard_error= math.sqrt(var)
+                                rightError0 = (conditional0+standard_error)/max(conditional1-standard_error, aproxZero)
+                                leftError0  =  max(conditional0-standard_error, aproxZero)/(conditional1+standard_error)
+                                se = (math.log(rightError0) - math.log(leftError0))/2
+                                se = math.sqrt(math.pow(se,2)+math.pow(priorError,2))
+
+                                # add value to set of values
+                                a.addAttValue(AttValue(str(round(cn,rndFac)),
+                                                       math.log(conditional0/conditional1/prior),
+                                                       lineWidth=thickness,
+                                                       error = se))
+                            except:
+                                pass
+                a.continuous = True
+
+        
+            if a and len(a.attValues)>1:
+                self.bnomogram.addAttribute(a)
+
+        self.alignRadio.setDisabled(False)
+        self.graph.setScene(self.bnomogram)
+        self.bnomogram.show()
+    
+    def calculateDistributions(self, cl):
+        #condition_data = Orange.data.Table([d for d in self.data if d[attribute] == value])
+        class_name = cl.domain.classVar.name
+        #cd_count = len(condition_data)
+        #class_count = [1 for d in condition_data if d[class_name] == 1]
+        
+        d_count = len(self.data)
+        count = {}
+        ccount = {}
+        
+        for instance in self.data:
+            instance_cls = str(instance[class_name])
+            ccount[instance_cls] = ccount.get(instance_cls, 0) + 1
+            for att_index, att_value in enumerate(instance):
+                att_value = str(att_value)
+                count[att_index] = count.get(att_index, {})                 
+                count[att_index][att_value] = count[att_index].get(att_value, {})                 
+                count[att_index][att_value][instance_cls] = count[att_index][att_value].get(instance_cls, 0) + 1
+            
+        distributions = {}    
+        for att_index, att in enumerate(cl.domain.attributes):
+            distributions[att.name] = {}
+            for value in att.values:
+                distributions[att.name][value] = {}
+                for c in cl.domain.classVar.values:
+                    num = count[att_index][value].get(c, 0)
+                    distributions[att.name][value][c] = num*1.0 / ccount[c]
+        #cl.conditionalDistributions = distributions
+        dist = Orange.statistics.contingency.Domain(self.data)
+        cl.conditionalDistributions = Orange.statistics.contingency.Domain(self.data)
+        
+        general_dist = {}
+        for c in cl.domain.classVar.values:
+            general_dist[c] = ccount[c] / d_count
+        
+        #cl.distribution = general_dist
+        cl.distribution = Orange.statistics.distribution.Distribution(self.data)
+        
+        return distributions
+        
+    def generateData(self, cl):
+        combinations = []
+        import numpy as np
+        for attr in cl.domain.attributes:
+            if attr.varType == orange.VarTypes.Discrete:
+                values = attr.values
+                combinations.append(values)
+            else:
+                attr_stat = self.stat[attr.name]
+                start = attr_stat.min
+                stop = attr_stat.max
+                step = (stop - start)*1.0/3
+                values = [n for n in np.arange(start, stop, step)]
+               # values.append(start)
+                values.append(stop)
+               # values.sort()
+                combinations.append(values)
+        
+        #data.domain.attributes[0].values
+        #Orange.data.Table
+        #new_data = data.clone() 
+        
+        # I think i shoud specify continious type somewhere
+        
+        new_data = Orange.data.Table(cl.domain, [])
+        for combination in itertools.product(*combinations):
+            combination_list = list(combination)
+            combination_list.append('?')
+            di = Orange.data.Instance(cl.domain, combination_list)
+            c = cl(di)
+            combination_list.pop()
+            combination_list.append(c)
+            new_data.append(combination_list)
+        
+        return new_data
+        
+    def generalClassifierBayes(self, cl):
         
        # classVal = cl.domain.classVar
        # att = cl.domain.attributes
@@ -696,6 +879,10 @@ class OWNomogramGeneral(OWWidget):
     def initClassValues(self, classValue):
         self.targetCombo.clear()
         self.targetCombo.addItems([str(v) for v in classValue])
+
+    def setData(self, orange_data):
+        self.myvar = 'Gregas var :D'
+        self.learn_data = orange_data
 
     def classifier(self, cl):
         self.closeContext()
@@ -758,16 +945,9 @@ class OWNomogramGeneral(OWWidget):
                         return
 
         if isinstance(self.cl, orange.BayesClassifier):
-#            if len(self.cl.domain.classVar.values)>2:
-#                QMessageBox("OWNomogram:", " Please use only Bayes classifiers that are induced on data with dichotomous class!", QMessageBox.Warning,
-#                            QMessageBox.NoButton, QMessageBox.NoButton, QMessageBox.NoButton, self).show()
-#            else:
-                self.nbClassifier(self.cl)
-##        elif isinstance(self.cl, orngLR_Jakulin.MarginMetaClassifier) and self.data:
-##            self.svmClassifier(self.cl)
+            self.nbClassifier(self.cl)
         elif isinstance(self.cl, orange.RuleClassifier_logit):
             self.ruleClassifier(self.cl)
-            
 
         elif isinstance(self.cl, orange.LogRegClassifier):
             # get if there are any continuous attributes in data -> then we need data to compute margins
@@ -783,7 +963,9 @@ class OWNomogramGeneral(OWWidget):
         elif isinstance(self.cl, Orange.classification.svm.LinearClassifier):
             self.lr2Classifier(self.cl)
         else:
+            
             self.generalClassifier(self.cl)
+        #self.generalClassifier(self.cl)
             
         if self.sort_type>0:
             self.sortNomogram()
@@ -887,6 +1069,8 @@ if __name__=="__main__":
 
     #data = orange.ExampleTable("C:\Python27\Lib\site-packages\Orange\datasets\heart_disease.tab")
     debug_data = orange.ExampleTable('C:\Python27\Lib\site-packages\Orange\datasets\\titanic.tab')
+    debug_data = orange.ExampleTable('C:\Python27\Lib\site-packages\Orange\datasets\\iris.tab')
+    ow.setData(debug_data)
 
     import orngTree
     debug_tree = orngTree.TreeLearner(debug_data)
@@ -895,8 +1079,9 @@ if __name__=="__main__":
 
     debug_bayes = orange.BayesLearner(debug_data)
     debug_bayes.setattr("data", debug_data)
-    ow.classifier(debug_rforest)
-
+    
+    ow.classifier(debug_tree)
+    
     #rules = orange.RuleLearner_logit(data)
 
     # here you can test setting some stuff
